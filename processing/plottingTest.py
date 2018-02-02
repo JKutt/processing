@@ -6,10 +6,9 @@ import matplotlib.pyplot as plt
 # define the file required for import
 fileName = "/Users/juan/Documents/testData/FieldSchool_2017new.DAT"
 
-patch = DCIP.loadDias(fileName)
-# print(patch.window_center)
+patch = DCIP.loadDias(fileName)   # Create the patch from data file
 
-rdg = 0                           # reading number
+rdg = 0                           # Source to plot
 
 f, plts = plt.subplots(2, 3)
 plts[0, 0].plot(patch.window_center,

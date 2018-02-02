@@ -25,6 +25,12 @@ def createHanningWindow(num_taps):
     num_taps = number of taps for the requested window
 
     """
+    indx1 = np.arange(0, num_taps)                # create  sequence array
+    weights = 0.5 - (0.5 *
+                     np.cos((2. * np.pi * indx1) /
+                            (indx1.size)))        # creates window
+
+    return weights
 
 
 def createChebyshevWindow(num_taps):
