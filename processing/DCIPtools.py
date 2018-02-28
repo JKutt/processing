@@ -3,43 +3,256 @@
 
 import numpy as np
 from scipy import sparse
+from scipy.special import factorial
 from SimPEG.EM.Static import DC
 
 ##################################################
 # define methods
 
 
-def createKaiserWindow(num_taps):
+def calcColeCole(mx_decay, window_widths):
+    """
+    takes in a decay and returns best fitting cole-cole
+    note:
+    A tool to calculate the time - domain voltage response[V(t) / Vo] for a
+    homogenous Cole - Cole model of the earth using the digital linear filter
+    formulation given by Guptasarma(Geophys, vol 47, pg 1575, 1982)
+    """
+    time = np.zeros(window_widths.size)
+    for i in range(time.size):
+        time[i] = (np.sum(window_widths[0:i + 1]) / 2.0) / 1000.0
+    # window_widths - 2000.0       # window centers array
+    c = np.zeros(9)                      # conductivity array
+    v_cole = np.zeros(window_widths.size)  # best fit cole-cole
+    tau = np.zeros(9)                    # time constant array
+    err = np.zeros((9, 9))               # error matrix
+    cole_m = np.zeros((9, 9))            # matrix of chargeabilities
+    radius = 2.0                         # radius of array fill
+    c[5] = 0.65                          # center of cond. array
+    tau[5] = 0.25                        # center of tau array
+    tau10 = np.log10(tau[5])             # log of time constant
+    idx = np.arange(0, 9)
+    c = c[5] + radius * (idx - 5) / 40.0  # fill cond. array
+    tau = np.power(10.0,
+                   (tau10 + radius * (idx - 5)))  # fill tau array
+
+    # create filter
+    areg = np.asarray([-3.82704, -3.56608, -3.30512, -3.04416,
+                       -2.78320, -2.52224, -2.26128, -2.00032,
+                       -1.73936, -1.47840, -1.21744, -.95648,
+                       -.69552, -0.43456, -0.17360, 0.08736,
+                       0.34832, 0.60928, 0.87024, 1.13120, 1.39216])
+    # create 2nd filter
+    preg = np.asarray([0.000349998, -0.000418371, 0.000772828,
+                      -0.000171356, 0.001022172, 0.000897638,
+                      0.002208974, 0.003844944, 0.006809040,
+                      0.013029162, 0.022661391, 0.042972904,
+                      0.075423603, 0.139346367, 0.234486236,
+                      0.366178323, 0.284615486, -0.235691746,
+                      0.046994188, -0.005901946, 0.000570165])
+    fit_weights = np.ones(time.size)  # create filter weights
+    v_cole = np.zeros(time.size)
+    minErr = 0.5
+    c_idx = 0
+    tau_idx = 0
+    for i in range(c.size):
+        for j in range(tau.size):
+            ax = c[5] * np.pi / 2.0
+            for win in range(mx_decay.size):
+                v_temp = 0.0
+                for n in range(areg.size):
+                    w = np.power(10.0, (areg[n] - np.log10(time[win])))
+                    ex = np.power(w * tau[j], c[i])
+                    y = np.complex(ex * np.cos(ax), ex * np.sin(ax))
+                    z = 1.0 - 1.0 / (1.0 + y)
+                    v_temp = v_temp + preg[n] * np.real(z)
+                v_cole[win] = v_temp
+
+            # calculate error
+            norm_weights = np.sum(fit_weights) / fit_weights.size
+            serr = (np.sum(np.power((mx_decay - v_cole), 2) *
+                    fit_weights) / norm_weights)
+            err[i, j] = np.sqrt(serr / (fit_weights.size - 1))
+            if err[i, j] < minErr:
+                c_idx = i
+                tau_idx = j
+
+            cole_m[i, j] = (np.sum(v_cole * window_widths) /
+                            np.sum(window_widths))
+            # print(mx_decay)
+    print(tau)
+
+    return cole_m
+
+
+def getWeightedVs(stack, window_start, window_end, attenuation):
+    """
+    takes in data and returns decay
+    Input:
+    stack = Half period stacked Voltage data
+    window_start = an array of window start times
+    window_end = an array of window end times
+
+    """
+    timebase = np.round(window_end[len(window_end) - 1] / 1000.0)
+    timebase = timebase * 1000
+    time = np.arange(0, timebase, (timebase / stack.size))
+    vsDecay = np.zeros((len(window_end)))
+    # loop through and do every window
+    for win in range(len(window_start)):
+        # find how many samples in first window
+        cntr = 0
+        # get time span for tail of windows
+        start_tmp = window_start[win] - (
+            0.45 * (window_end[win] - window_start[win]))
+        if win == (vsDecay.size - 1):
+            end_tmp = window_end[win]
+        else:
+            end_tmp = window_end[win] + (
+                0.45 * (window_end[win] - window_start[win]))
+        # print start_tmp, end_tmp
+        for i in range(stack.size):
+            if time[i] >= start_tmp and time[i] <= end_tmp:
+                cntr += 1
+        # print "number of sample are:"
+        # print cntr
+        # create window wieghts
+        indx1 = np.arange(0, attenuation)
+        weights = 0.5 - (0.5 * np.cos((2 * np.pi * indx1) / (indx1.size - 1)))
+        # create new weights
+        Wg = np.zeros(cntr)
+        start_Wg = (indx1.size / 2.0 - 1.0) - (cntr / 2.0) + 1
+        for r in range(Wg.size):
+            Wg[r] = weights[int(start_Wg) + r]
+        # print Wg
+        # create vector storing weighted values
+        Vs_window = np.zeros(cntr)
+        Vs_window_ave = np.zeros(cntr)
+        # get window times
+        w_idx = np.zeros(cntr)
+        # assign total time and time step
+        count = 0
+        for i in range(time.size):
+            if time[i] >= start_tmp and time[i] <= end_tmp:
+                w_idx[count] = time[i]
+                Vs_window[count] = stack[i] * -1 * Wg[count]
+                Vs_window_ave[count] = stack[i] * -1
+                count += 1
+        sumWin = np.sum(Vs_window)
+        # print Vs_window
+        vsDecay[win] = sumWin / cntr
+
+    return vsDecay
+
+
+def createKaiserWindow(num_taps, attenuation):
     """
     creates a Kaiser window
     Input:
     num_taps = number of taps for the requested window
 
     """
+    x = factorial(2)
+    return x
 
 
-def createHanningWindow(num_taps):
+def mbessel(position, max_iter):
+    seq_m = np.arange(0, max_iter)
+    fact_m = factorial(seq_m, exact=False)
+    summation = 0.0
+    for i in range(max_iter):
+        inc = np.power(1.0 / fact_m * np.power(position * 0.5, i), 2)
+        frac = inc / summation
+        summation += inc
+        if frac < 0.001:
+            break
+    return summation
+
+
+def cheby_poly(n, x):
+    pos = 0.0
+    if np.abs(x) <= 1.0:
+        pos = np.cos(n * np.arccos(x))
+    else:
+        pos = np.cosh(n * np.arccosh(x))
+    return pos
+
+
+def createHanningWindow(num_points):
     """
-    creates a Hanning window
+    creates a Hanning window filter kernal
+    Input:
+    num_points = number of taps for the requested window
+
+    """
+    indx1 = np.arange(1, num_points + 1).T          # create  sequence array
+    filterKernal = 0.5 * (1 - np.cos((2 * np.pi /
+                          (indx1.size - 1)) * indx1))  # creates window
+
+    bkernal = np.ones((3, 1))
+    bkernal[1] = -2.0
+    bsgn = np.ones((1, filterKernal.size))
+    bsgn[0, 1::2] = bsgn[0, 1::2] * -1
+    # bwtd = np.zeros((3, filterKernal.size))
+    bwtd = np.matmul(bkernal, bsgn * filterKernal)
+    tmp1 = np.arange(1, 4)
+    tmp1 = np.reshape(tmp1, (3, 1))
+    tmp2 = np.ones((1, filterKernal.size))
+    tmp3 = np.ones((3, 1))
+    tmp4 = np.arange(filterKernal.size)
+    tmp4 = np.reshape(tmp4, (1, filterKernal.size))
+    knew = (np.matmul(tmp1, tmp2) +
+            np.matmul(tmp3, (tmp4 * (filterKernal.size + 3))))
+    btmp = np.zeros((filterKernal.size + 2, filterKernal.size))
+    shape_knew = knew.shape
+    num_elements_kn = shape_knew[0] * shape_knew[1]
+    knew = np.reshape(knew, num_elements_kn, order='F')
+    shape = btmp.shape
+    num_elements = shape[0] * shape[1]
+    btmp = np.reshape(btmp, num_elements, order='F')
+    shape_bwtd = bwtd.shape
+    num_elements_b = shape_bwtd[0] * shape_bwtd[1]
+    bwtd = np.reshape(bwtd, num_elements_b, order='F')
+    for idx in range(knew.size):
+        btmp[int(knew[idx]) - 1] = bwtd[idx]
+    btmp = np.reshape(btmp, shape, order='F')
+    bHK = np.sum(btmp, 1)
+    norm_bHK = np.sum(np.abs(bHK))
+    bHK = bHK / norm_bHK
+    bHK = np.reshape(bHK, (bHK.size, 1))
+
+    return bHK
+
+
+def createChebyshevWindow(num_taps, attenuation):
+    """
+    creates a Chebyshev window
     Input:
     num_taps = number of taps for the requested window
 
     """
-    indx1 = np.arange(0, num_taps)                # create  sequence array
-    weights = 0.5 - (0.5 *
-                     np.cos((2. * np.pi * indx1) /
-                            (indx1.size)))        # creates window
-
+    weights = np.zeros(num_taps)
+    summation = 0.0
+    max_value = 0.0
+    tg = np.power(10, (attenuation / 20))
+    x0 = np.cosh(1.0 / (num_taps - 1)) * np.arccosh(tg)
+    M = (num_taps - 1) / 2
+    if (num_taps % 2) == 0:
+        M = M + 0.5
+    for nn in range(num_taps / 2 + 1):
+        n = nn - M
+        summation = 0.0
+        for i in range(int(M)):
+            summation += cheby_poly(num_taps - 1.0,
+                                    x0 * np.cos((2.0 *
+                                                n * np.pi * i) / num_taps))
+        weights[nn] = tg + 2 * summation
+        weights[num_taps - nn - 1] = weights[nn]
+        if weights[nn] > max_value:
+            max_value = weights[nn]
+    for ii in range(num_taps):
+        weights[ii] /= max_value
     return weights
-
-
-def createChebyshevWindow(num_taps):
-    """
-    creates a Kaiser window
-    Input:
-    num_taps = number of taps for the requested window
-
-    """
 
 
 def getPrimaryVoltage(start, end, stack):
@@ -157,7 +370,6 @@ class dcipTimeSeries:
         tmp = tmp * 4
         # create the +ve/-ve
         for i in range(tmp.size):
-            # print i
             tmp[i] = tmp[i] * (pow((-1), (i + 2)))
 
         # create full filter kernal
@@ -198,13 +410,30 @@ class dcipTimeSeries:
         filterKernal = a numpy array consisting of filter kernal
         e.g Hanning, Kaiser, etc...
         """
-        self.data = 100. / 1000
+        if filterKernal.size > 3:
+            bkernal = np.ones((3, 1))              # create basic 3 T kernal
+            bkernal[1] = -2.0
+            bsgn = np.ones((1, filterKernal.size))
+            bsgn[0, 0::2] = bsgn[0, 0::2] * -1.0         # linear drift removal
+            bwt = np.zeros((3, filterKernal.size))
+            bwt = np.matmul(bkernal, bsgn * filterKernal) # creates stack kernal
+
+            # map and sum the weighted kernal of bwt
+            k0 = np.range(filterKernal.size * 3) + 1
+            tmp1 = np.arange(3) + 1
+            tmp2 = np.ones(filterKernal.size)
+            tmp3 = np.ones((3, 1))
+            tmp4 = np.arange(filterKernal.size)
+            knew = np.matmul(tmp1, tmp2) + np.matmul(tmp3, (tmp4 * (filterKernal.size + 3)))
+
 
     def ensembleStackTimeSeries(self, filterKernal):
         """
         TODO
         Input:
         filterKernal = a numpy array consisting of filter kernal
+                note: the size of the filter Kernal will be used
+                to determine how many ensembles.
                 e.g Hanning, Kaiser, etc...
         error_allowance = std of acceptance of decay
         """
