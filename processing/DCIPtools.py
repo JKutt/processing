@@ -5,6 +5,88 @@ import numpy as np
 from scipy import sparse
 from scipy.special import factorial
 from SimPEG.EM.Static import DC
+##################################################
+# Playing around
+
+
+class filterKernal(object):
+    """
+        Filter Kernal for stacking a time-series
+        signal raw signal
+    """
+    def __init__(self, filtershape=None):
+        if filtershape is None:
+            filtershape = np.zeros(1)
+
+        self.filtershape = filtershape
+
+        if filtershape.size > 1:
+            # create the filter kernal
+            bkernal = np.ones((3, 1))
+            bkernal[1] = -2.0
+            bsgn = np.ones((1, self.filtershape.size))
+            bsgn[0, 1::2] = bsgn[0, 1::2] * -1
+            bwtd = np.matmul(bkernal, bsgn * self.filtershape)
+            tmp1 = np.arange(1, 4)
+            tmp1 = np.reshape(tmp1, (3, 1))
+            tmp2 = np.ones((1, self.filtershape.size))
+            tmp3 = np.ones((3, 1))
+            tmp4 = np.arange(self.filtershape.size)
+            tmp4 = np.reshape(tmp4, (1, self.filtershape.size))
+            knew = (np.matmul(tmp1, tmp2) +
+                    np.matmul(tmp3, (tmp4 * (self.filtershape.size + 3))))
+            btmp = np.zeros((self.filtershape.size + 2, self.filtershape.size))
+            shape_knew = knew.shape
+            num_elements_kn = shape_knew[0] * shape_knew[1]
+            knew = np.reshape(knew, num_elements_kn, order='F')
+            shape = btmp.shape
+            num_elements = shape[0] * shape[1]
+            btmp = np.reshape(btmp, num_elements, order='F')
+            shape_bwtd = bwtd.shape
+            num_elements_b = shape_bwtd[0] * shape_bwtd[1]
+            bwtd = np.reshape(bwtd, num_elements_b, order='F')
+            for idx in range(knew.size):
+                btmp[int(knew[idx]) - 1] = bwtd[idx]
+            btmp = np.reshape(btmp, shape, order='F')
+            tHK = np.sum(btmp, 1)
+            norm_tHK = np.sum(np.abs(tHK))
+            tHK = tHK / norm_tHK
+            tHK = np.reshape(tHK, (tHK.size, 1))
+        else:
+            tHK = np.zeros(1)
+        self.kernal = tHK
+
+    def __mul__(self, signal):
+        size_of_stack = int(signal.size / self.filtershape.size)
+        Ax = np.reshape(signal, (int(size_of_stack),
+                        int(self.kernal.size)), order='F')
+        shape_Ax = Ax.shape
+        shape_tHK = self.kernal.shape
+        self.stack = np.matmul(Ax, self.kernal)
+
+        return self.stack
+        # if shape_Ax[1] == shape_tHK[0]:
+        #     stack = np.matmul(Ax, self.filterKernal)
+        #     return stack
+        # else:
+        #     print("not happenin")
+        #     return 0
+
+    def sizeOfFilter(self):
+        """
+            :rtypr int
+            :return: number of points in filter kernal
+        """
+        return self.filtershape.size
+
+    def getFrequnceyResponse(self):
+        """
+           :rtype numpy array
+           :return: frequeny response of the filter kernal
+        """
+        if self.filtershape != '*':
+            return self.filtershape.size
+
 
 ##################################################
 # define methods
@@ -18,10 +100,11 @@ def calcColeCole(mx_decay, window_widths):
     homogenous Cole - Cole model of the earth using the digital linear filter
     formulation given by Guptasarma(Geophys, vol 47, pg 1575, 1982)
     """
-    time = np.zeros(window_widths.size)
+    time = np.zeros(window_widths.size)  # initiates time
+    # convert window widths to accumlative times specific to algorithm
     for i in range(time.size):
         time[i] = (np.sum(window_widths[0:i + 1]) / 2.0) / 1000.0
-    # window_widths - 2000.0       # window centers array
+
     c = np.zeros(9)                      # conductivity array
     v_cole = np.zeros(window_widths.size)  # best fit cole-cole
     tau = np.zeros(9)                    # time constant array
@@ -34,8 +117,7 @@ def calcColeCole(mx_decay, window_widths):
     idx = np.arange(0, 9)
     c = c[5] + radius * (idx - 5) / 40.0  # fill cond. array
     tau = np.power(10.0,
-                   (tau10 + radius * (idx - 5)))  # fill tau array
-
+                   (tau10 + radius * (idx - 5) / 2.))  # fill tau array
     # create filter
     areg = np.asarray([-3.82704, -3.56608, -3.30512, -3.04416,
                        -2.78320, -2.52224, -2.26128, -2.00032,
@@ -51,10 +133,13 @@ def calcColeCole(mx_decay, window_widths):
                       0.366178323, 0.284615486, -0.235691746,
                       0.046994188, -0.005901946, 0.000570165])
     fit_weights = np.ones(time.size)  # create filter weights
-    v_cole = np.zeros(time.size)
-    minErr = 0.5
-    c_idx = 0
-    tau_idx = 0
+    v_cole = np.zeros(time.size)      # initiate decay array
+    minErr = 0.5                      # signify initial Low error
+    minErr2 = 0.5                     # test parameter
+    c_idx = 0                         # index of cond. of min err
+    tau_idx = 0                       # index of cond. of min err
+
+    # loop through the arrays of cond. and tau
     for i in range(c.size):
         for j in range(tau.size):
             ax = c[5] * np.pi / 2.0
@@ -76,13 +161,26 @@ def calcColeCole(mx_decay, window_widths):
             if err[i, j] < minErr:
                 c_idx = i
                 tau_idx = j
+                minErr = (err[i, j])
+                minErr2 = (err[i, j] /
+                           np.sqrt((np.mean(np.power((mx_decay - v_cole), 2) *
+                                   fit_weights)) / norm_weights))
 
             cole_m[i, j] = (np.sum(v_cole * window_widths) /
-                            np.sum(window_widths))
-            # print(mx_decay)
-    print(tau)
+                            np.sum(window_widths)) * 1000.0    # calcs Mx
 
-    return cole_m
+            # go back and calculate best fit cole-cole curve and save it
+            for win in range(mx_decay.size):
+                v_temp = 0.0
+                for n in range(areg.size):
+                    w = np.power(10.0, (areg[n] - np.log10(time[win])))
+                    ex = np.power(w * tau[tau_idx], c[c_idx])
+                    y = np.complex(ex * np.cos(ax), ex * np.sin(ax))
+                    z = 1.0 - 1.0 / (1.0 + y)
+                    v_temp = v_temp + preg[n] * np.real(z)
+                v_cole[win] = v_temp
+
+    return c[c_idx], tau[tau_idx], cole_m[c_idx, tau_idx], minErr2, v_cole
 
 
 def getWeightedVs(stack, window_start, window_end, attenuation):
@@ -186,42 +284,10 @@ def createHanningWindow(num_points):
 
     """
     indx1 = np.arange(1, num_points + 1).T          # create  sequence array
-    filterKernal = 0.5 * (1 - np.cos((2 * np.pi /
+    filterWindow = 0.5 * (1 - np.cos((2 * np.pi /
                           (indx1.size - 1)) * indx1))  # creates window
 
-    bkernal = np.ones((3, 1))
-    bkernal[1] = -2.0
-    bsgn = np.ones((1, filterKernal.size))
-    bsgn[0, 1::2] = bsgn[0, 1::2] * -1
-    # bwtd = np.zeros((3, filterKernal.size))
-    bwtd = np.matmul(bkernal, bsgn * filterKernal)
-    tmp1 = np.arange(1, 4)
-    tmp1 = np.reshape(tmp1, (3, 1))
-    tmp2 = np.ones((1, filterKernal.size))
-    tmp3 = np.ones((3, 1))
-    tmp4 = np.arange(filterKernal.size)
-    tmp4 = np.reshape(tmp4, (1, filterKernal.size))
-    knew = (np.matmul(tmp1, tmp2) +
-            np.matmul(tmp3, (tmp4 * (filterKernal.size + 3))))
-    btmp = np.zeros((filterKernal.size + 2, filterKernal.size))
-    shape_knew = knew.shape
-    num_elements_kn = shape_knew[0] * shape_knew[1]
-    knew = np.reshape(knew, num_elements_kn, order='F')
-    shape = btmp.shape
-    num_elements = shape[0] * shape[1]
-    btmp = np.reshape(btmp, num_elements, order='F')
-    shape_bwtd = bwtd.shape
-    num_elements_b = shape_bwtd[0] * shape_bwtd[1]
-    bwtd = np.reshape(bwtd, num_elements_b, order='F')
-    for idx in range(knew.size):
-        btmp[int(knew[idx]) - 1] = bwtd[idx]
-    btmp = np.reshape(btmp, shape, order='F')
-    bHK = np.sum(btmp, 1)
-    norm_bHK = np.sum(np.abs(bHK))
-    bHK = bHK / norm_bHK
-    bHK = np.reshape(bHK, (bHK.size, 1))
-
-    return bHK
+    return filterWindow
 
 
 def createChebyshevWindow(num_taps, attenuation):
