@@ -2,6 +2,7 @@
 # Imports
 
 import numpy as np
+from scipy import fftpack
 from scipy import sparse
 from scipy.special import factorial
 from SimPEG.EM.Static import DC
@@ -9,10 +10,112 @@ from SimPEG.EM.Static import DC
 # Playing around
 
 
+class decayKernal(object):
+    """
+       Decay kernal for calculating a decay
+       from a stack
+    """
+    def __init__(self,
+                 window_starts=None,
+                 window_ends=None,
+                 window_weight=None,
+                 window_overlap=None):
+        if window_starts is None:
+            window_starts = '*'
+        self.window_starts = window_starts
+        if window_ends is None:
+            window_ends = '*'
+        self.window_ends = window_ends
+        if window_weight is None:
+            window_weight = '*'
+        self.window_weight = window_weight
+        if window_overlap is None:
+            window_overlap = '*'
+        self.window_overlap = window_overlap / 100.
+
+    def __mul__(self, stack):
+        """
+        takes in stack data and returns decay
+        Input:
+        stack = Half period stacked Voltage data
+
+        """
+        # calculate weighted window decay data =============
+        if self.window_starts != '*':
+            timebase = np.round(self.window_ends[self.window_ends.size - 1] / 1000.)
+            timebase = timebase * 1000
+            time = np.arange(0, timebase, (timebase / stack.size))
+            vsDecay = np.zeros((self.window_ends.size))
+            # loop through and do every window
+            for win in range(self.window_starts.size):
+                # find how many samples in first window
+                cntr = 0
+                # get time span for tail of windows
+                start_tmp = self.window_starts[win] - (
+                    self.window_overlap *
+                    (self.window_ends[win] - self.window_starts[win]))
+                if win == (vsDecay.size - 1):
+                    end_tmp = self.window_ends[win]
+                else:
+                    end_tmp = self.window_ends[win] + (
+                        self.window_overlap *
+                        (self.window_ends[win] - self.window_starts[win]))
+                # print start_tmp, end_tmp
+                for i in range(stack.size):
+                    if time[i] >= start_tmp and time[i] <= end_tmp:
+                        cntr += 1
+                # create window wieghts
+                indx1 = np.arange(0, self.window_weight)
+                weights = 0.5 - (0.5 *
+                                 np.cos((2 * np.pi * indx1) /
+                                        (indx1.size - 1)))
+                # create new weights
+                Wg = np.zeros(cntr)
+                start_Wg = (indx1.size / 2.0 - 1.0) - (cntr / 2.0) + 1
+                for r in range(Wg.size):
+                    Wg[r] = weights[int(start_Wg) + r]
+                # print Wg
+                # create vector storing weighted values
+                Vs_window = np.zeros(cntr)
+                Vs_window_ave = np.zeros(cntr)
+                # get window times
+                w_idx = np.zeros(cntr)
+                # assign total time and time step
+                count = 0
+                for i in range(time.size):
+                    if time[i] >= start_tmp and time[i] <= end_tmp:
+                        w_idx[count] = time[i]
+                        Vs_window[count] = stack[i] * -1 * Wg[count]
+                        Vs_window_ave[count] = stack[i] * -1
+                        count += 1
+                sumWin = np.sum(Vs_window)
+                # print Vs_window
+                vsDecay[win] = sumWin / cntr
+            # end decay =======================================
+
+            return vsDecay
+
+    def getWindowCenters(self):
+        """
+           returns window centers
+        """
+        window_centers = (np.asarray(self.window_ends) +
+                          np.asarray(self.window_starts)) / 2.
+        return window_centers
+
+    def getWindowWidths(self):
+        """
+           returns window widths
+        """
+        window_widths = (np.asarray(self.window_ends) -
+                         np.asarray(self.window_starts))
+        return window_widths
+
+
 class filterKernal(object):
     """
         Filter Kernal for stacking a time-series
-        signal raw signal
+        raw signal
     """
     def __init__(self, filtershape=None):
         if filtershape is None:
@@ -22,11 +125,12 @@ class filterKernal(object):
 
         if filtershape.size > 1:
             # create the filter kernal
-            bkernal = np.ones((3, 1))
-            bkernal[1] = -2.0
+            tkernal = np.ones((3, 1))
+            tkernal[1] = -2.0               # 3 point kernal
             bsgn = np.ones((1, self.filtershape.size))
-            bsgn[0, 1::2] = bsgn[0, 1::2] * -1
-            bwtd = np.matmul(bkernal, bsgn * self.filtershape)
+            bsgn[0, 1::2] = bsgn[0, 1::2] * -1  # alternate pol rem lin drift
+            bwtd = np.matmul(tkernal,
+                             bsgn * self.filtershape)  # filter weights
             tmp1 = np.arange(1, 4)
             tmp1 = np.reshape(tmp1, (3, 1))
             tmp2 = np.ones((1, self.filtershape.size))
@@ -35,7 +139,8 @@ class filterKernal(object):
             tmp4 = np.reshape(tmp4, (1, self.filtershape.size))
             knew = (np.matmul(tmp1, tmp2) +
                     np.matmul(tmp3, (tmp4 * (self.filtershape.size + 3))))
-            btmp = np.zeros((self.filtershape.size + 2, self.filtershape.size))
+            btmp = np.zeros((self.filtershape.size + 2,
+                             self.filtershape.size))  # create zero matrix
             shape_knew = knew.shape
             num_elements_kn = shape_knew[0] * shape_knew[1]
             knew = np.reshape(knew, num_elements_kn, order='F')
@@ -46,7 +151,7 @@ class filterKernal(object):
             num_elements_b = shape_bwtd[0] * shape_bwtd[1]
             bwtd = np.reshape(bwtd, num_elements_b, order='F')
             for idx in range(knew.size):
-                btmp[int(knew[idx]) - 1] = bwtd[idx]
+                btmp[int(knew[idx]) - 1] = bwtd[idx]  # fill diag w/ weights
             btmp = np.reshape(btmp, shape, order='F')
             tHK = np.sum(btmp, 1)
             norm_tHK = np.sum(np.abs(tHK))
@@ -54,23 +159,39 @@ class filterKernal(object):
             tHK = np.reshape(tHK, (tHK.size, 1))
         else:
             tHK = np.zeros(1)
-        self.kernal = tHK
+        self.kernal = tHK         # assign weighted kernal
 
     def __mul__(self, signal):
-        size_of_stack = int(signal.size / self.filtershape.size)
+        """
+           performs the stacking calculation
+        """
+        size_of_stack = int(signal.size / (self.kernal.size))
         Ax = np.reshape(signal, (int(size_of_stack),
                         int(self.kernal.size)), order='F')
         shape_Ax = Ax.shape
         shape_tHK = self.kernal.shape
-        self.stack = np.matmul(Ax, self.kernal)
+        if shape_Ax[1] == shape_tHK[0]:
+            stack = np.matmul(Ax, self.kernal)  # create stack data
+            return stack
+        else:
+            return 0
+
+    def __rmul__(self, signal):
+        """
+           performs the stacking calculation
+        """
+        size_of_stack = int(signal.size / (self.kernal.size))
+        Ax = np.reshape(signal, (int(size_of_stack),
+                        int(self.kernal.size)), order='F')
+        shape_Ax = Ax.shape
+        shape_tHK = self.kernal.shape
+        if shape_Ax[1] == shape_tHK[0]:
+            stack = np.matmul(Ax, self.kernal)  # create stack data
+            return stack
+        else:
+            return 0
 
         return self.stack
-        # if shape_Ax[1] == shape_tHK[0]:
-        #     stack = np.matmul(Ax, self.filterKernal)
-        #     return stack
-        # else:
-        #     print("not happenin")
-        #     return 0
 
     def sizeOfFilter(self):
         """
@@ -79,17 +200,123 @@ class filterKernal(object):
         """
         return self.filtershape.size
 
-    def getFrequnceyResponse(self):
-        """
-           :rtype numpy array
-           :return: frequeny response of the filter kernal
-        """
-        if self.filtershape != '*':
-            return self.filtershape.size
-
 
 ##################################################
 # define methods
+def getFrequnceyResponse(signal):
+    """
+       :rtype numpy array
+       :return: frequeny response of the filter kernal
+    """
+    v_fft = fftpack.fft(signal)
+    amplitude = np.sqrt(v_fft.real**2 + v_fft.imag**2)
+    return amplitude[0:(amplitude.size / 2 - 1)] / np.max(amplitude)
+
+
+def getPhaseResponse(signal):
+    """
+       :rtype numpy array
+       :return: Rhase response of the filter kernal
+    """
+    v_fft = fftpack.fft(signal)
+    phase = np.arctan2(v_fft.imag, v_fft.real)
+    return phase[0:(phase.size / 2 - 1)]
+
+
+def getColeCole(mx_decay,
+                init_cond,
+                init_tau,
+                step_factor,
+                window_widths,
+                window_weights):
+    """
+    takes in a decay and returns best fitting cole-cole
+    note:
+    A tool to calculate the time - domain voltage response[V(t) / Vo] for a
+    homogenous Cole - Cole model of the earth using the digital linear filter
+    formulation given by Guptasarma(Geophys, vol 47, pg 1575, 1982)
+    """
+    time = np.zeros(window_widths.size)  # initiates time
+    # convert window widths to accumlative times specific to algorithm
+    for i in range(time.size):
+        time[i] = (np.sum(window_widths[0:i + 1]) / 2.0) / 1000.0
+    c = np.zeros(9)                      # conductivity array
+    v_cole = np.zeros(window_widths.size)  # best fit cole-cole
+    tau = np.zeros(9)                    # time constant array
+    err = np.zeros((9, 9))               # error matrix
+    cole_m = np.zeros((9, 9))            # matrix of chargeabilities
+    radius = step_factor                 # radius of array fill
+    c[5] = init_cond                     # center of cond. array
+    tau[5] = init_tau                    # center of tau array
+    tau10 = np.log10(tau[5])             # log of time constant
+    idx = np.arange(0, 9)
+    c = c[5] + radius * (idx - 5) / 40.0  # fill cond. array
+    tau = np.power(10.0,
+                   (tau10 + radius * (idx - 5) / 2.))  # fill tau array
+    # create filter
+    areg = np.asarray([-3.82704, -3.56608, -3.30512, -3.04416,
+                       -2.78320, -2.52224, -2.26128, -2.00032,
+                       -1.73936, -1.47840, -1.21744, -.95648,
+                       -.69552, -0.43456, -0.17360, 0.08736,
+                       0.34832, 0.60928, 0.87024, 1.13120, 1.39216])
+    # create 2nd filter
+    preg = np.asarray([0.000349998, -0.000418371, 0.000772828,
+                      -0.000171356, 0.001022172, 0.000897638,
+                      0.002208974, 0.003844944, 0.006809040,
+                      0.013029162, 0.022661391, 0.042972904,
+                      0.075423603, 0.139346367, 0.234486236,
+                      0.366178323, 0.284615486, -0.235691746,
+                      0.046994188, -0.005901946, 0.000570165])
+    v_cole = np.zeros(time.size)      # initiate decay array
+    minErr = 0.5                      # signify initial Low error
+    c_idx = 0                         # index of cond. of min err
+    tau_idx = 0                       # index of cond. of min err
+
+    # loop through the arrays of cond. and tau
+    for i in range(c.size):
+        for j in range(tau.size):
+            ax = c[5] * np.pi / 2.0
+            for win in range(mx_decay.size):
+                v_temp = 0.0
+                for n in range(areg.size):
+                    w = np.power(10.0, (areg[n] - np.log10(time[win])))
+                    ex = np.power(w * tau[j], c[i])
+                    y = np.complex(ex * np.cos(ax), ex * np.sin(ax))
+                    z = 1.0 - 1.0 / (1.0 + y)
+                    v_temp = v_temp + preg[n] * np.real(z)
+                v_cole[win] = v_temp
+
+            # calculate error
+            norm_weights = np.sum(window_weights) / window_weights.size
+            serr = (np.sum(np.power((mx_decay - v_cole), 2) *
+                    window_weights) / norm_weights)
+            err = np.sqrt(serr / (window_weights.size))
+            if err < minErr:
+                c_idx = i
+                tau_idx = j
+                minErr = (err)
+
+            mx_conversion = 1000.                 # conversion for mV/V
+            cole_m[i, j] = (np.sum(v_cole * window_widths) /
+                            np.sum(window_widths)) * mx_conversion  # calcs Mx
+
+            # go back and calculate best fit cole-cole curve and save it
+            for win in range(mx_decay.size):
+                v_temp = 0.0
+                for n in range(areg.size):
+                    w = np.power(10.0, (areg[n] - np.log10(time[win])))
+                    ex = np.power(w * tau[tau_idx], c[c_idx])
+                    y = np.complex(ex * np.cos(ax), ex * np.sin(ax))
+                    z = 1.0 - 1.0 / (1.0 + y)
+                    v_temp = v_temp + preg[n] * np.real(z)
+                v_cole[win] = v_temp
+
+            # calculate the percent diff
+            percent_diff = (
+                np.mean((np.abs((v_cole - mx_decay) /
+                        ((v_cole + mx_decay) / 2.))) * window_weights))
+
+    return c[c_idx], tau[tau_idx], cole_m[c_idx, tau_idx], percent_diff, v_cole
 
 
 def calcColeCole(mx_decay, window_widths):
@@ -104,15 +331,14 @@ def calcColeCole(mx_decay, window_widths):
     # convert window widths to accumlative times specific to algorithm
     for i in range(time.size):
         time[i] = (np.sum(window_widths[0:i + 1]) / 2.0) / 1000.0
-
     c = np.zeros(9)                      # conductivity array
     v_cole = np.zeros(window_widths.size)  # best fit cole-cole
     tau = np.zeros(9)                    # time constant array
     err = np.zeros((9, 9))               # error matrix
     cole_m = np.zeros((9, 9))            # matrix of chargeabilities
-    radius = 2.0                         # radius of array fill
-    c[5] = 0.65                          # center of cond. array
-    tau[5] = 0.25                        # center of tau array
+    radius = 1.0                        # radius of array fill
+    c[5] = 0.45                          # center of cond. array
+    tau[5] = 0.0025                        # center of tau array
     tau10 = np.log10(tau[5])             # log of time constant
     idx = np.arange(0, 9)
     c = c[5] + radius * (idx - 5) / 40.0  # fill cond. array
@@ -133,9 +359,10 @@ def calcColeCole(mx_decay, window_widths):
                       0.366178323, 0.284615486, -0.235691746,
                       0.046994188, -0.005901946, 0.000570165])
     fit_weights = np.ones(time.size)  # create filter weights
+    fit_weights[0] = 0.5
+    fit_weights[1] = 0.5
     v_cole = np.zeros(time.size)      # initiate decay array
     minErr = 0.5                      # signify initial Low error
-    minErr2 = 0.5                     # test parameter
     c_idx = 0                         # index of cond. of min err
     tau_idx = 0                       # index of cond. of min err
 
@@ -157,17 +384,15 @@ def calcColeCole(mx_decay, window_widths):
             norm_weights = np.sum(fit_weights) / fit_weights.size
             serr = (np.sum(np.power((mx_decay - v_cole), 2) *
                     fit_weights) / norm_weights)
-            err[i, j] = np.sqrt(serr / (fit_weights.size - 1))
-            if err[i, j] < minErr:
+            err = np.sqrt(serr / (fit_weights.size))
+            if err < minErr:
                 c_idx = i
                 tau_idx = j
-                minErr = (err[i, j])
-                minErr2 = (err[i, j] /
-                           np.sqrt((np.mean(np.power((mx_decay - v_cole), 2) *
-                                   fit_weights)) / norm_weights))
+                minErr = (err)
 
+            mx_conversion = 1000.                 # conversion for mV/V
             cole_m[i, j] = (np.sum(v_cole * window_widths) /
-                            np.sum(window_widths)) * 1000.0    # calcs Mx
+                            np.sum(window_widths)) * mx_conversion  # calcs Mx
 
             # go back and calculate best fit cole-cole curve and save it
             for win in range(mx_decay.size):
@@ -180,7 +405,12 @@ def calcColeCole(mx_decay, window_widths):
                     v_temp = v_temp + preg[n] * np.real(z)
                 v_cole[win] = v_temp
 
-    return c[c_idx], tau[tau_idx], cole_m[c_idx, tau_idx], minErr2, v_cole
+            # calculate the percent diff
+            percent_diff = (
+                np.mean((np.abs((v_cole - mx_decay) /
+                        ((v_cole + mx_decay) / 2.))) * fit_weights))
+
+    return c[c_idx], tau[tau_idx], cole_m[c_idx, tau_idx], percent_diff, v_cole
 
 
 def getWeightedVs(stack, window_start, window_end, attenuation):
@@ -427,7 +657,6 @@ class dcipTimeSeries:
         simple brute stack algorithm
 
         """
-
         rectime = self.data.size / self.samplerate   # time of signal
         T = self.timebase                            # determine Period T
         numT = np.floor(rectime / T)                 # number of T
@@ -468,30 +697,6 @@ class dcipTimeSeries:
             data_stack[idx] = stackD[0, idx]
         # return the amplitude
         return data_stack
-
-    def stackTimeSeries(self, filterKernal):
-        """
-        TODO
-        Input:
-        filterKernal = a numpy array consisting of filter kernal
-        e.g Hanning, Kaiser, etc...
-        """
-        if filterKernal.size > 3:
-            bkernal = np.ones((3, 1))              # create basic 3 T kernal
-            bkernal[1] = -2.0
-            bsgn = np.ones((1, filterKernal.size))
-            bsgn[0, 0::2] = bsgn[0, 0::2] * -1.0         # linear drift removal
-            bwt = np.zeros((3, filterKernal.size))
-            bwt = np.matmul(bkernal, bsgn * filterKernal) # creates stack kernal
-
-            # map and sum the weighted kernal of bwt
-            k0 = np.range(filterKernal.size * 3) + 1
-            tmp1 = np.arange(3) + 1
-            tmp2 = np.ones(filterKernal.size)
-            tmp3 = np.ones((3, 1))
-            tmp4 = np.arange(filterKernal.size)
-            knew = np.matmul(tmp1, tmp2) + np.matmul(tmp3, (tmp4 * (filterKernal.size + 3)))
-
 
     def ensembleStackTimeSeries(self, filterKernal):
         """
